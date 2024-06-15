@@ -117,7 +117,7 @@ def profiling(args):
 
 def main():
 	parser = argparse.ArgumentParser(description='tester')
-	parser.add_argument('game'                     , action='store', default='splendor', help='The name of the game to simulate')
+	parser.add_argument('game'                     , action='store', default='sinomilia', help='The name of the game to simulate')
 	parser.add_argument('--checkpoint'      , '-C' , action='store', default='./temp/', help='')
 	parser.add_argument('--load-folder-file', '-L' , action='store', default=None     , help='')
 	
