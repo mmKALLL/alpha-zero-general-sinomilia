@@ -460,9 +460,9 @@ class Board():
 			freed_card = self.freed_cards[2*player+freed_card_slot]
 			if not _is_empty_card(freed_card):
 				for y,x in admissible_cells:
-					 result_4orient = _check_card_on_machine(freed_card, y, x, optim_needpipes[y,x,:], optim_neighbors[y,x,:], nb_open_pipes)
-					 yx = x + MACHINE_SIZE*(y + MACHINE_SIZE*freed_card_slot)
-					 result[(yx)*4:(yx+1)*4] = result_4orient
+					result_4orient = _check_card_on_machine(freed_card, y, x, optim_needpipes[y,x,:], optim_neighbors[y,x,:], nb_open_pipes)
+					yx = x + MACHINE_SIZE*(y + MACHINE_SIZE*freed_card_slot)
+					result[(yx)*4:(yx+1)*4] = result_4orient
 
 		return result
 	
