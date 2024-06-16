@@ -28,7 +28,7 @@ class SinomiliaGame(Game):
 		next_player = self.board.make_move(action, player, random_seed)
 		return (self.board.get_state(), next_player)
 
-
+	# player is either 0 or 1
 	def getValidMoves(self, board, player):
 		self.board.copy_state(board, False)
 		return self.board.valid_moves(player)

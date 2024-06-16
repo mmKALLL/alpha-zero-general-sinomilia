@@ -3,47 +3,53 @@ from numba import njit
 import numba
 
 ############################## BOARD DESCRIPTION ##############################
-# Board is described by a 58x2 array (1st dim is larger with 3+ players). 2nd
-# dimension stores game history (y=0 is current state, y=1 is previous state)
-# The 15 types of cards and 4 types of monuments are defined at the bottom of
-# the current file. Here is the description of each line of the board. For
-# readibility, we defined "shortcuts" that actually are views(numpy name) of
-# overal board.
+# Board is described by a numba array.
+# For development, players are referred to as 1 and 2, but the input values are normalized to 0 or 1 where possible.
+# There are several limitations: moon chips are not used, bonuses for winning with 0 or 1 chips left are not used
+# 
 ##### Index  Shortcut              	Meaning
-#####   0    self.round  			Round number
-#####   1    self.last_dice      	Value of last dice(s) roll (sum if 2 dices)
-#####   2    self.player_state		Usually 0. Is 2 if current player plays again (amusement park). Add 1 if player rolls dices again (radio tower)
-#####  3-17  self.market			Numbers of remaining cards in main deck for each of 15 card types
-##### 18-19  self.players_money		Money for each player
-##### 20-49  self.players_cards		Number of cards for each player (P0-card0, P0-card1, ... P1-card0, P1-card1, ...)
-##### 50-58  self.players_monuments	Number of monuments for each player
-# Indexes above are assuming 2 players, you can have more details in copy_state().
-# Limitations of monuments:
-#   Train station: 	always roll 2 dices, no question asked
-#   Stadium: 		choose the most expensive building from richest player, and
-#            		swap it with my cheapest card
-# 	TV channel: 	take the $5 from the richest
+#####  0-9   self.p1_cards          Cards in the hand of player 1, 0 if the card is in play or in hand, 1 if the card card has been used
+##### 10-19  self.p2_cards          Cards in the hand of player 2, 0 if the card is in play or in hand, 1 if the card card has been used
+#####  20    self.start_player      0 or 1, depending on who went first in the current round
+#####  21    self.pass_active	      0 or 1, depending on whether the preceding player passed
+#####  22    self.p1_changed        0 or 1, 1 after p1 has changed cards in the current round
+#####  23    self.p2_changed        0 or 1, 1 after p2 has changed cards in the current round
+#####  24    self.p1_chips          Number of chips in bank for p1
+#####  25    self.p2_chips          Number of chips in bank for p2
+#####  26    self.p1_chips_bet      Number of chips bet by p1 in current round
+#####  27    self.p2_chips_bet      Number of chips bet by p2 in current round
+#####  28    self.chips_bet_total   Number of chips bet in total in current round
+#####  29    self.moon_chips_bet_total    Number of moon chips bet in total in current round
+#####  30    self.moon_chip_active  0 or 1, 1 if the last play was a moon chip
+#####  31    self.p1_cards_total    Number of cards in hand+play for player 1
+#####  32    self.p2_cards_total    Number of cards in hand+play for player 2
+#####  33    self.p1_nines_total    Number of times 9 has been played for player 1
+#####  34    self.p2_nines_total    Number of times 9 has been played for player 2
+#####  35    self.played_card_number    Card number chosen by the currently active player
+#####  36    self.round             Current round number; used for MCTS optimization
+#
+# There's also hidden state:
+# self.selected_cards  2 element array, -1 means the player doesn't have a card chosen yet (start of game, after round, after playing change)
 
 ############################## ACTION DESCRIPTION #############################
-# There are 21 actions. Here is description of each action:
+# There are 13 actions. Here is description of each action:
 ##### Index  Meaning
-#####   0    Buy a card of type 0 (CHAMPS)
-#####   1    Buy a card of type 1 (FERME)
+#####   0    Select the 0 card
+#####   1    Select the 1 card
 #####  ...
-#####  14    Buy a card of type 14 (MARCHE)
-#####  15    Buy monument of type 0 (GARE)
-#####  ...
-#####  18    Buy monument of type 4 (PARC)
-#####  19    Roll dice(s) again
-#####  20    No move
+#####   9    Select the 9 card
+#####  10    Pass
+#####  11    Play chip
+#####  12    Play moon chip
+#####  13    Change card
 
 @njit(cache=True, fastmath=True, nogil=True)
 def observation_size(num_players):
-	return (18 + 20*num_players, 2) # 2nd dimension is to keep history of previous states
+	return (37, 2) # 2nd dimension is to keep history of previous states
 
 @njit(cache=True, fastmath=True, nogil=True)
 def action_size():
-	return 21
+	return 13
 
 @njit(cache=True, fastmath=True, nogil=True)
 def my_random_choice_and_normalize(prob):
@@ -51,320 +57,268 @@ def my_random_choice_and_normalize(prob):
 	result = np.searchsorted(np.cumsum(prob), np.random.random(), side="right")
 	return result
 
-spec = [
-	('num_players'         , numba.int8),
-	('current_player_index', numba.int8),
 
-	('state'            , numba.int8[:,:]),
-	('round'            , numba.int8[:]),
-	('last_dice'        , numba.int8[:]),
-	('player_state'     , numba.int8[:]),
-	('market'           , numba.int8[:,:]),
-	('players_money'    , numba.int8[:,:]),
-	('players_cards'    , numba.int8[:,:]),
-	('players_monuments', numba.int8[:,:]),
+spec = [
+	('state', numba.int8[:,:]),
+	('p1_cards', numba.int8[:]),
+	('p2_cards', numba.int8[:]),
+	('start_player', numba.int8[:]),
+	('pass_active', numba.int8[:]),
+	('p1_changed', numba.int8[:]),
+	('p2_changed', numba.int8[:]),
+	('p1_chips', numba.int8[:]),
+	('p2_chips', numba.int8[:]),
+	('p1_chips_bet', numba.int8[:]),
+	('p2_chips_bet', numba.int8[:]),
+	('chips_bet_total', numba.int8[:]),
+	('moon_chips_bet_total', numba.int8[:]),
+	('moon_chip_active', numba.int8[:]),
+	('p1_cards_total', numba.int8[:]),
+	('p2_cards_total', numba.int8[:]),
+	('self.p1_nines_total', numba.int8[:]),
+	('self.p2_nines_total', numba.int8[:]),
+	('self.played_card_number', numba.int8[:]),
+	('self.round', numba.int8[:]),
 ]
 @numba.experimental.jitclass(spec)
 class Board():
 	def __init__(self, num_players):
 		self.num_players = num_players
 		self.current_player_index = 0
+		self.selected_cards = [-1, -1]
 		self.state = np.zeros(observation_size(self.num_players), dtype=np.int8)
 		self.init_game()
 
-	def get_score(self, player):
-		return np.multiply(self.players_monuments[4*player:4*(player+1), 0], monuments_cost).sum() # np.dot() not supported by numba
-
-	def get_wealth(self, player):
-		return self.get_score(player) + self.players_money[player, 0]
-
 	def init_game(self):
 		self.copy_state(np.zeros(observation_size(self.num_players), dtype=np.int8), copy_or_not=False)
-
-		# self.round[:] = 0
-		self.market[:,:] = 6
-		self.market[6:9,:] = 4 # Special case with purple cards
-		self.players_money[:,:] = 3
-		for p in range(self.num_players):
-			self.players_cards[15*p + 0,:] = 1
-			self.players_cards[15*p + 1,:] = 1
-
-		# self.players_monuments[:,:] = 0
-		
+		self.p1_chips = 15
+		self.p2_chips = 15
+		self.p1_cards_total = 10
+		self.p2_cards_total = 10
+  
 	def get_state(self):
 		return self.state
 
 	def valid_moves(self, player):
-		result = np.zeros(21, dtype=np.bool_)
-		result[0   :15]     = self._valid_buy_card(player)
-		result[15  :15+4]   = self._valid_buy_monument(player)
-		result[15+4:15+4+1] = self._valid_diceagain(player)
-		result[20] = True #empty move
+		"""
+		Returns a boolean array representing the validity of each possible action for the given player.
+
+		:param player: The current player.
+		:return: A boolean array where each index represents whether the corresponding action is valid.
+		"""
+		result = np.zeros(14, dtype=np.bool_)
+		result[0:10] = self._valid_select_card(player)
+		result[10] = self._valid_pass(player)
+		result[11] = self._valid_play_chip(player)
+		result[12] = self._valid_play_chip(player)
+		result[13] = self._valid_change_card(player)
 		return result
 
-	def make_move(self, move, player, random_seed):
-		# Actual move
-		if   move < 15:
-			self._buy_card(player, move)
-		elif move < 15+4:
-			self._buy_monument(player, move-15)
-		elif move == 19:
-			self._dice_again(player)
-		elif move == 20:
-			pass
+	def _valid_select_card(self, player):
+		"""
+		Determine the validity of selecting each card (0-9) for the given player.
+		:return: A boolean array where each index represents whether selecting the corresponding card is valid.
+		"""
+		if (self.selected_cards[player] != -1):
+			return np.zeros(10, dtype=np.bool_)
+		valid = np.zeros(10, dtype=np.bool_)
+		for i in range(10):
+				valid[i] = self.state[player * 10 + i] == 0
+		return valid
 
-		# Decide next player and increase number of rounds
-		# print(f'P={player}, round={self.round[0]}       ', end='')
-		if move == 19: # decide to re-roll dices
-			next_player = player
-		elif self.player_state[0] >= 2: # player had identical dices values
-			self.round[0] += 1
-			next_player = player
-		else:
-			self.round[0] += 1
-			next_player = (player+1)%self.num_players
+	def _valid_pass(self, player):
+		"""Determine the validity of passing for the given player."""
+		return self.selected_cards[player] != -1
+
+	def _valid_play_chip(self, player):
+		"""Determine the validity of playing a chip for the given player."""
+		return self._valid_pass(player) and self.chips_bet_total < 9 and (self.p1_chips > 0 if player == 0 else self.p2_chips > 0)
+
+	def _valid_change_card(self, player):
+		"""Determine the validity of changing a card for the given player."""
+		return self._valid_play_chip(player) and (self.p1_changed == 0 if player == 0 else self.p2_changed == 0)
+      
+	def make_move(self, move, player, random_seed):
+		if move != 13:
+			self.round += 1
+		# Actual move
+		if   move <= 9:
+			self._select_card(player, move)
+		elif move == 10:
+			self._pass(player)
+		elif move == 11:
+			self._play_chip(player)
+		elif move == 12:
+			self._play_moon_chip(player)
+		elif move == 13:
+			self._change_card(player)
+
 		# print(f'next={next_player}, round={self.round[0]}')
 
-		# Copy history from row 0 to row 1
-		if move != 19:
-			for data in [self.market, self.players_money, self.players_cards, self.players_monuments]:
-				data[:,1] = data[:,0]
-			self.round[1] = self.round[0]
-			# self.last_dice[1] = self.last_dice[0]
-			# self.player_state[1] = self.player_state[0]
-			
-		# Roll dice for next player
-		# print('  ', self.players_money[:,0], end=' ')
-		self.last_dice[0], identical_dices = self._roll_dice(next_player)
-		self._dice_effect(self.last_dice[0], player_who_rolled=next_player)
-		# print('  ', self.players_money[:,0], end=' ')
+		if (move == 13):
+			return player # same player goes again if they changed cards
+		return 1 - player # switch players
 
-		# Note down whether player has re-rolled dices or has played a new turn
-		self.player_state[0]  = 1 if move == 19      else 0
-		self.player_state[0] += 2 if identical_dices else 0
+	def _select_card(self, player, card):
+		self.played_card_number = card
+		self.selected_cards[player] = card
 
-		return next_player
+	def _pass(self, player):
+		if self.pass_active or self.moon_chip_active:
+			self._handle_round_end(player)
+		else: self.pass_active = 1
+
+	def _play_chip(self, player):
+		if player == 0:
+			self.p1_chips -= 1
+			self.p1_chips_bet += 1
+		else:
+			self.p2_chips -= 1
+			self.p2_chips_bet += 1
+		self.chips_bet_total += 1
+		self.pass_active = 0
+		self.moon_chip_active = 0
+
+	def _play_moon_chip(self, player):
+		self._play_chip(player)  # Perform common chip playing logic
+		self.moon_chips_bet_total += 1
+		self.moon_chip_active = 1
+
+	def _change_card(self, player):
+		if player == 0 and not self.p1_changed:
+			self.p1_changed = 1
+			self.selected_cards[0] = -1  # Reset selected card for player 1
+		elif player == 1 and not self.p2_changed:
+			self.p2_changed = 1
+			self.selected_cards[1] = -1  # Reset selected card for player 2
+
+		self.played_card_number = -1  # Reset the played card number
+
+	def _handle_round_end(self, player_who_passed_last):
+		p1_card = self.selected_cards[0]
+		p2_card = self.selected_cards[1]
+		p1_diff = abs(self.chips_bet_total - p1_card)
+		p2_diff = abs(self.chips_bet_total - p2_card)
+		winning_player = -1
+		winner_chip_gain = self.chips_bet_total + self.moon_chips_bet_total + 2
+
+		if p1_diff < p2_diff:
+			self.p1_chips += winner_chip_gain
+			winning_player = 0
+		elif p2_diff < p1_diff:
+			self.p2_chips += winner_chip_gain
+			winning_player = 1
+		else:
+			if self.moon_chip_active:
+				# If a moon chip was played and a pass ends the game, the passing player wins the tie
+				if player_who_passed_last == 0: # Player 1 passed last
+					self.p1_chips += winner_chip_gain
+					winning_player = 0
+				else:  # Player 1 passed last
+					self.p2_chips += winner_chip_gain
+					winning_player = 1
+			else:
+				# Standard tie-breaking rule
+				if player_who_passed_last == 0:  # Player 1 passed last, so Player 2 wins the tie
+					self.p2_chips += winner_chip_gain
+					winning_player = 0
+				else:  # Player 0 passed last, so Player 1 wins the tie
+					self.p1_chips += winner_chip_gain
+					winning_player = 1
+
+		self._reset_round_state(winning_player)
+
+
+	def _reset_round_state(self, winning_player):
+		self.p1_chips_bet = 0
+		self.p2_chips_bet = 0
+		self.chips_bet_total = 0
+		self.moon_chips_bet_total = 0
+		self.pass_active = 0
+		self.moon_chip_active = 0
+		self.p1_changed = 0
+		self.p2_changed = 0
+		self.selected_cards[0] = -1
+		self.selected_cards[1] = -1
+		self.round += 1
+		self.start_player = winning_player
 
 	def copy_state(self, state, copy_or_not):
 		if self.state is state and not copy_or_not:
 			return
 		self.state = state.copy() if copy_or_not else state
-		n = self.num_players
-		self.round             = self.state[0              ,:]	# 1      # Round number
-		self.last_dice         = self.state[1              ,:]	# 1      # Value of last dice(s) roll
-		self.player_state      = self.state[2              ,:]	# 1      # Usually 0. Is 2 if current player plays again (amusement park). Add 1 if player rolls dices again (radio tower)
-		self.market            = self.state[3      :18     ,:]	# 15     # Numbers of remaining cards in main deck
-		self.players_money     = self.state[18     :18+n   ,:]	# n*1    # Numbers of money for each player
-		self.players_cards     = self.state[18+n   :18+16*n,:]	# n*15   # Number of cards for each player (P0-card0, P0-card1, ... P1-card0, P1-card1, ...)
-		self.players_monuments = self.state[18+16*n:18+20*n,:]	# n*4    # Number of monuments for each player
+		self.selected_cards = self.selected_cards.copy()
+  
+		self.p1_cards = self.state[0:10,:] ###  0-9   self.p1_cards          Cards in the hand of player 1, 0 if the card is in play or in hand, 1 if the card card has been used
+		self.p2_cards = self.state[10:20,:] ### 10-19  self.p2_cards          Cards in the hand of player 2, 0 if the card is in play or in hand, 1 if the card card has been used
+		self.start_player = self.state[20,:] ###  20    self.start_player      0 or 1, depending on who went first in the current round
+		self.pass_active = self.state[21,:] ###  21    self.pass_active	       0 or 1, depending on whether the preceding player passed
+		self.p1_changed = self.state[22,:] ###  22    self.p1_changed        0 or 1, 1 after p1 has changed cards in the current round
+		self.p2_changed = self.state[23,:] ###  23    self.p2_changed        0 or 1, 1 after p2 has changed cards in the current round
+		self.p1_chips = self.state[24,:] ###  24    self.p1_chips          Number of chips in bank for p1
+		self.p2_chips = self.state[25,:] ###  25    self.p2_chips          Number of chips in bank for p2
+		self.p1_chips_bet = self.state[26,:] ###  26    self.p1_chips_bet      Number of chips bet by p1 in current round
+		self.p2_chips_bet = self.state[27,:] ###  27    self.p2_chips_bet      Number of chips bet by p2 in current round
+		self.chips_bet_total = self.state[28,:] ###  28    self.chips_bet_total   Number of chips bet in total in current round
+		self.moon_chips_bet_total = self.state[29,:] ###  29    self.moon_chips_bet_total    Number of moon chips bet in total in current round
+		self.moon_chip_active = self.state[30,:] ###  30    self.moon_chip_active  0 or 1, 1 if the last play was a moon chip
+		self.p1_cards_total = self.state[31,:] ###  31    self.p1_cards_total    Number of cards in hand+play for player 1
+		self.p2_cards_total = self.state[32,:] ###  32    self.p2_cards_total    Number of cards in hand+play for player 2
+		self.p1_nines_total = self.state[33,:] ###  33    self.p1_nines_total    Number of times 9 has been played for player 1
+		self.p2_nines_total = self.state[34,:] ###  34    self.p2_nines_total    Number of times 9 has been played for player 2
+		self.played_card_number = self.state[35,:] ###  35    self.played_card_number    Card number chosen by the currently active player
+		self.round = self.state[36,:]
 
 	def check_end_game(self):
-		scores = np.array([self.get_score(p) for p in range(self.num_players)], dtype=np.int8)
-		score_max = scores.max()
-		if score_max < monuments_cost.sum() and self.get_round() < 126 and np.all(self.players_money[:,0] < 126):
-			return np.full(self.num_players, 0., dtype=np.float32)
-		single_winner = ((scores == score_max).sum() == 1)
-		winners = [(1. if single_winner else 0.01) if s == score_max else -1. for s in scores]
-		return np.array(winners, dtype=np.float32)
+		if (self.p1_chips > 0 and self.p2_chips > 0 and self.p1_cards_total > 2 and self.p2_cards_total > 2):
+			return 0
+		if (self.p1_chips > self.p2_chips):
+			return np.array([1, -1], dtype=np.float32)
+		elif (self.p1_chips < self.p2_chips):
+			return np.array([-1, 1], dtype=np.float32)
+		else: return np.array([-0.1, -0.1], dtype=np.float32)
 
 	# if n=1, transform P0 to Pn, P1 to P0, ... and Pn to Pn-1
 	# else do this action n times
-	def swap_players(self, nb_swaps):
-		def _roll_in_place_axis0(array, shift):
-			tmp_copy = array.copy()
-			size0 = array.shape[0]
-			for i in range(size0):
-				array[i,:] = tmp_copy[(i+shift)%size0,:]
-		_roll_in_place_axis0(self.players_money    , 1 *nb_swaps)
-		_roll_in_place_axis0(self.players_cards    , 15*nb_swaps)
-		_roll_in_place_axis0(self.players_monuments, 4 *nb_swaps)
+	def swap_players(self, player):
+		swap_copy = self.selected_cards.copy()
+		self.selected_cards = [swap_copy[1], swap_copy[0]]
+		
+		swap_copy = self.p1_cards.copy()
+		self.p1_cards[:] = self.p2_cards[:]
+		self.p2_cards[:] = swap_copy[:]
+  
+		swap_copy = self.p1_changed.copy()
+		self.p1_changed[:] = self.p2_changed[:]
+		self.p2_changed[:] = swap_copy[:]
+
+		swap_copy = self.p1_chips.copy()
+		self.p1_chips[:] = self.p2_chips[:]
+		self.p2_chips[:] = swap_copy[:]
+
+		swap_copy = self.p1_chips_bet.copy()
+		self.p1_chips_bet[:] = self.p2_chips_bet[:]
+		self.p2_chips_bet[:] = swap_copy[:]
+
+		self.start_player[:] = self.start_player.copy() ^ 1  # Flip 0 to 1 and 1 to 0
+  
+		# self.pass_active = self.state[21,:]
+		# self.moon_chip_active = self.state[30,:]
+		# self.played_card_number = self.state[35,:]
+		self.played_card_number = self.selected_cards[0]
+  
+		swap_copy = self.p1_cards_total.copy()
+		self.p1_cards_total[:] = self.p2_cards_total[:]
+		self.p2_cards_total[:] = swap_copy[:]
+
+		swap_copy = self.p1_nines_total.copy()
+		self.p1_nines_total[:] = self.p2_nines_total[:]
+		self.p2_nines_total[:] = swap_copy[:]
+
 
 	def get_symmetries(self, policy, valid_actions):
 		symmetries = [(self.state.copy(), policy.copy(), valid_actions.copy())]
 		return symmetries
 
 	def get_round(self):
-		return self.round[0]
-
-	def _valid_buy_card(self, player):
-		return np.logical_and(self.players_money[player,0] >= cards_cost, self.market[:,0])
-
-	def _valid_buy_monument(self, player):
-		return np.logical_and(self.players_money[player,0] >= monuments_cost, self.players_monuments[4*player:4*(player+1),0] == 0)
-
-	def _valid_diceagain(self, player):
-		# player must have 'radio' monument and not have played twice
-		return self.players_monuments[4*player+3,0] and self.player_state[0]%2 == 0
-	
-	def _buy_card(self, player, card):
-		self.players_money[player,0] -= cards_cost[card]
-		self.market[card,0] -= 1
-		self.players_cards[15*player + card,0] += 1
-
-	def _buy_monument(self, player, monument):
-		self.players_money[player,0] -= monuments_cost[monument]
-		self.players_monuments[4*player + monument,0] += 1
-
-	def _dice_again(self, player):
-		# Copy history to current row
-		for data in [self.market, self.players_money, self.players_cards, self.players_monuments]:
-			data[:,0] = data[:,1]
-		self.round[0] = self.round[1]
-
-	def _roll_dice(self, player_who_rolled):
-		dice = np.random.randint(1, 6)
-		identical = False
-		if self.players_monuments[4*player_who_rolled+0,0] > 0: # Has he got the train station allowing 2 dices?
-			dice2 = np.random.randint(1, 6)
-			identical = (dice == dice2)
-			# print('  Dé P' + str(player_who_rolled) + ' = ' + str(dice) + ' ' + str(dice2) + ('*' if identical else ''), end='')
-			dice += dice2
-		# else:
-		# 	print('  Dé P' + str(player_who_rolled) + ' = ' + str(dice), end='')
-		return dice, identical
-
-	def _dice_effect(self, result, player_who_rolled):
-		def _all_receive_from_bank(card_index, money):
-			for p in range(self.num_players):
-				self.players_money[p,0] += money * self.players_cards[15*p+card_index,0]
-				# if self.players_cards[15*p+card_index,0]:
-				# 	print(f'  P{p} +{money}*{self.players_cards[15*p+card_index,0]} from bank', end='')
-
-		def _current_receive_from_bank(card_index, money, bonus_if_mall=False):
-			p = player_who_rolled
-			bonus = 1 if bonus_if_mall and (self.players_monuments[4*p + CENTRECOM, 0] > 0) else 0
-			self.players_money[p,0] += (money+bonus) * self.players_cards[15*p+card_index,0]
-			# if self.players_cards[15*p+card_index,0]:
-			# 	print(f'  P{p} +{money+bonus}*{self.players_cards[15*p+card_index,0]} from bank', end='')
-
-		def _current_give(card_index, money, bonus_if_mall=False):
-			for player in range(player_who_rolled+self.num_players-1, player_who_rolled, -1):
-				p = player % self.num_players
-				bonus = 1 if bonus_if_mall and (self.players_monuments[4*p + CENTRECOM, 0] > 0) else 0
-				amount = min((money+bonus) * self.players_cards[15*p+card_index,0], self.players_money[player_who_rolled,0])
-				self.players_money[p                ,0] += amount
-				self.players_money[player_who_rolled,0] -= amount
-				# if amount:
-				# 	print(f'  P{p} +{amount} from P{player_who_rolled}', end='')
-
-		def _stadium():
-			# Every player give 2$ to current
-			for p in range(self.num_players):
-				if p == player_who_rolled:
-					continue
-				amount = min(self.players_money[p,0], 2)
-				self.players_money[p                ,0] -= amount
-				self.players_money[player_who_rolled,0] += amount
-				# if amount:
-				# 	print(f'  P{player_who_rolled} +{amount} from P{p}', end='')
-
-		def _business_center():
-			# Current can swap a building with someone else
-			# Let's buy the most expensive one from the richest player
-			# Against one of my low cost card
-			wealths = np.array([self.get_wealth(p) for p in range(self.num_players)], dtype=np.int8)
-			wealths[player_who_rolled] = 0 # Avoid swapping with yourself
-			target_player = my_random_choice_and_normalize(wealths == wealths.max())
-			target_player_cards_cost = np.multiply(np.minimum(self.players_cards[15*target_player:15*(target_player+1), 0], 1), cards_cost)
-			target_player_cards_cost[STADE], target_player_cards_cost[AFFAIRES], target_player_cards_cost[CHAINE] = 0, 0, 0 # Forbid to swap these cards
-			target_building = my_random_choice_and_normalize(target_player_cards_cost == target_player_cards_cost.max())
-			# Choose a very bad card to swap with
-			my_cards_cost = np.multiply(np.minimum(self.players_cards[15*player_who_rolled:15*(player_who_rolled+1), 0], 1), cards_cost)
-			for i in range(my_cards_cost.size):
-				if my_cards_cost[i] == 0:
-					my_cards_cost[i] = 99
-			my_building = my_random_choice_and_normalize(my_cards_cost == my_cards_cost.min())
-			# Do the swap now
-			self.players_cards[15*target_player    +target_building, 0] -= 1
-			self.players_cards[15*player_who_rolled+target_building, 0] += 1
-			self.players_cards[15*player_who_rolled+my_building, 0]     -= 1
-			self.players_cards[15*target_player    +my_building, 0]     += 1
-			# print(f'  P{player_who_rolled} swaps B{my_building} with B{target_building}-P{target_player}', end='')
-
-		def _tv_channel():
-			# Take 5$ from any player
-			# Let's choose someone who has 5$, the richest one if hesitating
-			moneys = self.players_money[:,0].copy()
-			moneys[player_who_rolled] = 0
-			money_max = min(moneys.max(), 5)
-			who_has_more_money = np.logical_or(moneys == money_max, moneys >= 5)
-			wealths = np.array([self.get_wealth(p) if who_has_more_money[p] else 0 for p in range(self.num_players)], dtype=np.int8)
-			target_player = my_random_choice_and_normalize(wealths == wealths.max())
-			# Now, take from him
-			amount = min(self.players_money[target_player, 0], 5)
-			self.players_money[target_player    ,0] -= amount
-			self.players_money[player_who_rolled,0] += amount
-			# if amount:
-			# 	print(f'  P{player_who_rolled} +{amount} from P{target_player}', end='')
-
-		if result == 1:
-			_all_receive_from_bank(CHAMPS, 1)
-		elif result == 2:
-			_all_receive_from_bank(FERME, 1)
-			_current_receive_from_bank(BOULANGERIE, 1, bonus_if_mall=True)
-		elif result == 3:
-			_current_give(CAFE, 1, bonus_if_mall=True) # give first
-			_current_receive_from_bank(BOULANGERIE, 1, bonus_if_mall=True)
-		elif result == 4:
-			_current_receive_from_bank(SUPERETTE, 3, bonus_if_mall=True)
-		elif result == 5:
-			_all_receive_from_bank(FORET, 1)
-		elif result == 6:
-			if self.players_cards[15*player_who_rolled+STADE, 0] > 0:
-				_stadium()
-			if self.players_cards[15*player_who_rolled+AFFAIRES, 0] > 0:
-				_business_center()
-			if self.players_cards[15*player_who_rolled+CHAINE, 0] > 0:
-				_tv_channel()
-		elif result == 7:
-			_current_receive_from_bank(FROMAGERIE, 3 * self._get_current_cow())
-		elif result == 8:
-			_current_receive_from_bank(MEUBLES, 3 * self._get_current_gear())
-		elif result == 9:
-			_current_give(RESTAURANT, 2, bonus_if_mall=True) # give first
-			_all_receive_from_bank(MINE, 5)
-		elif result == 10:
-			_current_give(RESTAURANT, 2, bonus_if_mall=True) # give first
-			_all_receive_from_bank(VERGER, 3)
-		elif result == 11:
-			_current_receive_from_bank(MARCHE, 2 * self._get_current_wheat())
-		elif result == 12:
-			_current_receive_from_bank(MARCHE, 2 * self._get_current_wheat())
-
-
-	def _get_current_cow(self):
-		return self.players_cards[15*self.current_player_index + FERME, 0]
-
-	def _get_current_gear(self):
-		return self.players_cards[15*self.current_player_index + FORET, 0] + self.players_cards[15*self.current_player_index + MINE, 0]
-
-	def _get_current_wheat(self):
-		return self.players_cards[15*self.current_player_index + CHAMPS, 0] + self.players_cards[15*self.current_player_index + VERGER, 0]
-
-
-# Index of cards
-CHAMPS      = 0 
-FERME       = 1
-BOULANGERIE = 2
-CAFE        = 3
-SUPERETTE   = 4
-FORET       = 5
-STADE       = 6
-AFFAIRES    = 7
-CHAINE      = 8
-FROMAGERIE  = 9
-MEUBLES     = 10
-MINE        = 11
-RESTAURANT  = 12
-VERGER      = 13
-MARCHE      = 14
-
-# Index of monuments
-GARE      = 0
-CENTRECOM = 1
-RADIO     = 2
-PARC      = 3
-
-# Cost of cards
-cards_cost = np.array([1, 1, 1, 2, 2, 3, 6, 8, 7, 5, 3, 6, 3, 3, 2], dtype=np.int8)
-monuments_cost = np.array([4, 10, 16, 22], dtype=np.int8)
+		return self.round[0] # TODO: Shouldn't this be a simple number...?

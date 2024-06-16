@@ -98,7 +98,7 @@ class Game():
         """
         Input:
             board: current board
-            player: current player (1 or -1)
+            player: current player (0-based index)
 
         Returns:
             canonicalBoard: returns canonical form of board. The canonical form
